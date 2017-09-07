@@ -212,6 +212,10 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     bool  fLogFileOutputOn = true;
     bool  fConsoleErrorOn = true;
     bool  fLogFileErrorOn = true;
+    bool  fLogFileAppend = false;
+    bool  bLogFileQuiet = false;
+
+    TCHAR *szLogFile = 0;
 
     TCHAR   szPidFile[MAX_PATH] = {0};
     HANDLE  hPidFile = INVALID_HANDLE_VALUE;
@@ -269,6 +273,21 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
 
             _tcscpy_s(szPidFile, _countof(szPidFile), argv[++i]);
         }
+        else if(0 == _tcsicmp(pszSwitch, _T("-file")))
+        {
+            if(i + 1 == argc)
+            {
+                ConPrint(_T("Error: -file switch specified without associated file name\n"));
+                dwRetCode = GetLastError();
+                goto Error;
+            }
+
+            szLogFile = argv[++i];
+        }
+        else if(0 == _tcsicmp(pszSwitch, _T("-quiet")))
+            bLogFileQuiet = true;
+        else if(0 == _tcsicmp(pszSwitch, _T("-append")))
+            fLogFileAppend = true;
         else
         {
             dwChildCmdLineStartOffset = i;
@@ -314,14 +333,20 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     // Figure out where log file output is going
     //
-    cchReqBufSize = GetEnvironmentVariable(_T("LOGFILE"), szMaxPathBuffer, MAX_PATH);
-    if( cchReqBufSize > 0 && cchReqBufSize <= MAX_PATH )
+    if(szLogFile == 0)
     {
-        if( (g_hLogFile = CreateFile(szMaxPathBuffer, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+        cchReqBufSize = GetEnvironmentVariable(_T("LOGFILE"), szMaxPathBuffer, MAX_PATH);
+        if(cchReqBufSize > 0 && cchReqBufSize <= MAX_PATH)
+            szLogFile = szMaxPathBuffer;
+    }
+    if(szLogFile != 0)
+    {
+        DWORD dwCreationDisposition = (fLogFileAppend ? OPEN_ALWAYS : CREATE_ALWAYS);
+        if( (g_hLogFile = CreateFile(szLogFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, dwCreationDisposition,
             FILE_ATTRIBUTE_NORMAL, NULL ) ) == INVALID_HANDLE_VALUE )
         {
             ConPrint(Format(bufFormatMain, _T("Error opening log file '%s':\n%s\n"),
-                szMaxPathBuffer, GetLastErrorMessage(bufLastErrorMain)));
+                szLogFile, GetLastErrorMessage(bufLastErrorMain)));
             dwRetCode = GetLastError();
             goto Error;
         }
@@ -444,7 +469,8 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     if( cchReqBufSize == 0 || cchReqBufSize >= MAX_PATH )
         _tcscpy_s( szMaxPathBuffer, _countof(szMaxPathBuffer), _T("SCRIPT_NAME not set") );
 
-    LogPrint(Format(bufFormatMain, _T("[%s] %s\r\n"), szMaxPathBuffer, pszArgs ) );
+    if(!bLogFileQuiet)
+        LogPrint(Format(bufFormatMain, _T("[%s] %s\r\n"), szMaxPathBuffer, pszArgs ) );
 
     //
     // Try to create the process plainly (without using CMD.EXE)
@@ -563,7 +589,8 @@ Error:
         //
         // Print a nice, ugly, grepable error signature
         //
-        LogPrint(Format(bufFormatMain, _T("******ERROR executing %s\r\n"), pszArgs));
+        if(!bLogFileQuiet)
+            LogPrint(Format(bufFormatMain, _T("******ERROR executing %s\r\n"), pszArgs));
     }
 
     for( int i = 0; i < bufCount; i++ )
@@ -617,5 +644,5 @@ Error:
     if( hPidFile != INVALID_HANDLE_VALUE )
         CloseHandle(hPidFile);
 
-	return dwRetCode;
+    return dwRetCode;
 }
