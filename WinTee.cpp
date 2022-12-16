@@ -184,6 +184,13 @@ DWORD WINAPI ListenerThread(LPVOID lpParameter)
     return dwRetCode;
 }
 
+static LPWSTR PathGetAndRemoveArgsW(LPWSTR p)
+{
+    LPWSTR q = PathGetArgsW(p);
+    PathRemoveArgsW(p);
+    return q + StrSpnW(q, L" \t\r\n");
+}
+
 extern "C" void mainCRTStartup()
 {
     static const WCHAR szCmdPrefix[] = L"cmd.exe /x/c ";
@@ -254,8 +261,7 @@ extern "C" void mainCRTStartup()
     while (*pszArgs == '-')
     {
         LPWSTR pszSwitch = pszArgs;
-        pszArgs = PathGetArgsW(pszArgs);
-        PathRemoveArgsW(pszSwitch);
+        pszArgs = PathGetAndRemoveArgsW(pszArgs);
 
         if( 0 == StrCmpIW(pszSwitch, L"-nc") )
         {
@@ -284,8 +290,7 @@ extern "C" void mainCRTStartup()
                 goto Error;
             }
             szPidFile = pszArgs;
-            pszArgs = PathGetArgsW(pszArgs);
-            PathRemoveArgsW(szPidFile);
+            pszArgs = PathGetAndRemoveArgsW(pszArgs);
             PathUnquoteSpacesW(szPidFile);
         }
         else if(0 == StrCmpIW(pszSwitch, L"-file"))
@@ -297,8 +302,7 @@ extern "C" void mainCRTStartup()
                 goto Error;
             }
             szLogFile = pszArgs;
-            pszArgs = PathGetArgsW(pszArgs);
-            PathRemoveArgsW(szLogFile);
+            pszArgs = PathGetAndRemoveArgsW(pszArgs);
             PathUnquoteSpacesW(szLogFile);
         }
         else if(0 == StrCmpIW(pszSwitch, L"-name"))
@@ -310,8 +314,7 @@ extern "C" void mainCRTStartup()
                 goto Error;
             }
             szScriptName = pszArgs;
-            pszArgs = PathGetArgsW(pszArgs);
-            PathRemoveArgsW(szScriptName);
+            pszArgs = PathGetAndRemoveArgsW(pszArgs);
             PathUnquoteSpacesW(szScriptName);
         }
         else if(0 == StrCmpIW(pszSwitch, L"-quiet"))
