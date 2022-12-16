@@ -1,8 +1,19 @@
-// Ex.cpp : Defines the entry point for the console application.
-//
-
-#include "stdafx.h"
 #include <windows.h>
+#include <shlwapi.h>
+#include <strsafe.h>
+#include <intrin.h>
+
+// lstrlenA(), lstrlenW() are evil in that they silently catch access violations
+#pragma intrinsic(strlen, wcslen)
+
+// Reinvent memset() to avoid a CRT dependency
+#pragma function(memset)
+
+void *memset(void *p, int c, size_t n)
+{
+    __stosb((unsigned char *)p, (unsigned char)c, n);
+    return p;
+}
 
 enum Buffer
 {
@@ -18,53 +29,46 @@ enum Buffer
 const DWORD c_PipeBufferSize = 0x1000;
 
 DWORD  g_cchBufSize[bufCount] = {0};
-LPTSTR g_pszBuffer[bufCount] = {NULL};
+LPSTR  g_pszBuffer[bufCount] = {NULL};
 HANDLE g_hStdOut = INVALID_HANDLE_VALUE;
 HANDLE g_hStdErr = INVALID_HANDLE_VALUE;
 HANDLE g_hLogFile = INVALID_HANDLE_VALUE;
 HANDLE g_hLogFileMutex = INVALID_HANDLE_VALUE;
 
-void ConPrint( LPCTSTR szOutput )
-{
-    DWORD dwBytesWritten = 0;
-    if( !WriteFile( g_hStdOut, szOutput, _tcslen(szOutput), &dwBytesWritten, NULL ) )
-        return;
-}
-
-void ExpandBuffer( Buffer buf, DWORD cchReqSize = 0 )
+void ExpandBuffer(Buffer buf, DWORD cchReqSize = 0)
 {
     if( cchReqSize == 0 )
         cchReqSize = (g_cchBufSize[buf] + 1000) * 2;
-    
+
     if( cchReqSize < g_cchBufSize[buf] )
         return;
 
-    if( g_pszBuffer[buf] != NULL )
+    if (cchReqSize > 0xFFFFFF)
     {
-        if( !HeapFree( GetProcessHeap(), NULL, g_pszBuffer[buf] ) )
-        {
-            g_pszBuffer[buf] = NULL;
-            g_cchBufSize[buf] = 0;
-            return;
-        }
+        FatalAppExitW(0, L"ExpandBuffer() failed: limit exceeded");
     }
 
-    g_pszBuffer[buf] = (LPTSTR) HeapAlloc( GetProcessHeap(), NULL, cchReqSize * sizeof(TCHAR) );
+    g_pszBuffer[buf] = (LPSTR)LocalFree(g_pszBuffer[buf]);
+    if( g_pszBuffer[buf] != NULL )
+    {
+        FatalAppExitW(0, L"ExpandBuffer() failed: can't free");
+    }
+
+    g_pszBuffer[buf] = (LPSTR)LocalAlloc(LPTR, cchReqSize);
     if( g_pszBuffer[buf] == NULL )
     {
-        g_cchBufSize[buf] = 0;
-        return;
+        FatalAppExitW(0, L"ExpandBuffer() failed: can't allocate");
     }
 
     g_cchBufSize[buf] = cchReqSize;
 }
 
-LPCTSTR Format( Buffer buf, LPCTSTR szFormat, ... )
+LPCSTR Format(Buffer buf, LPCSTR szFormat, ...)
 {
     va_list arglist;
     va_start(arglist, szFormat);
 
-    while( _vsntprintf_s( g_pszBuffer[buf], g_cchBufSize[buf], g_cchBufSize[buf] - 1, szFormat, arglist ) == -1 )
+    while( wvnsprintfA( g_pszBuffer[buf], g_cchBufSize[buf], szFormat, arglist ) < 0 )
         ExpandBuffer(buf);
 
     va_end(arglist);
@@ -72,32 +76,32 @@ LPCTSTR Format( Buffer buf, LPCTSTR szFormat, ... )
     return g_pszBuffer[buf];
 }
 
-LPCTSTR GetLastErrorMessage(Buffer buf)
+LPCSTR GetLastErrorMessage(Buffer buf, DWORD dwError = GetLastError())
 {
     LPVOID pvMsgBuf = NULL;
 
-    FormatMessage( 
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-        FORMAT_MESSAGE_FROM_SYSTEM | 
+    FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM |
         FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL,
-        GetLastError(),
+        dwError,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
-        (LPTSTR) &pvMsgBuf,
+        (LPSTR) &pvMsgBuf,
         0,
-        NULL 
+        NULL
     );
 
-    DWORD d = _tcslen( (LPCTSTR) pvMsgBuf );
+    DWORD d = strlen( (LPCSTR) pvMsgBuf );
     ExpandBuffer( buf, d + 1 );
-    _tcscpy_s( g_pszBuffer[buf], g_cchBufSize[buf], (LPCTSTR) pvMsgBuf );
+    StringCchCopyA( g_pszBuffer[buf], g_cchBufSize[buf], (LPCSTR) pvMsgBuf );
 
     LocalFree( pvMsgBuf );
 
     return g_pszBuffer[buf];
 }
 
-void LogPrint( LPCTSTR szOutput )
+void LogPrint(LPCSTR szOutput)
 {
     if( g_hLogFile == INVALID_HANDLE_VALUE )
         return;
@@ -106,8 +110,15 @@ void LogPrint( LPCTSTR szOutput )
         return;
 
     DWORD dwBytesWritten = 0;
-    if( !WriteFile( g_hLogFile, szOutput, _tcslen(szOutput), &dwBytesWritten, NULL ) )
-        return;
+    WriteFile( g_hLogFile, szOutput, strlen(szOutput), &dwBytesWritten, NULL );
+}
+
+void ConPrint(LPCSTR szOutput, bool fLogFileQuiet = true)
+{
+    DWORD dwBytesWritten = 0;
+    WriteFile( g_hStdOut, szOutput, strlen(szOutput), &dwBytesWritten, NULL );
+    if( !fLogFileQuiet )
+        LogPrint( szOutput );
 }
 
 struct ListenerParameters
@@ -138,7 +149,7 @@ DWORD WINAPI ListenerThread(LPVOID lpParameter)
         {
             if( !WriteFile(pParameters->hWritePipe, pParameters->pBuffer, dwBytesRead, &dwBytesWritten, NULL) )
             {
-                ConPrint(Format(pParameters->bufFormat, _T("Error writing to console:\n%s\n"),
+                ConPrint(Format(pParameters->bufFormat, "Error writing to console:\n%s\n",
                     GetLastErrorMessage(pParameters->bufLastError)));
                 dwRetCode = GetLastError();
             }
@@ -154,14 +165,14 @@ DWORD WINAPI ListenerThread(LPVOID lpParameter)
             {
                 ReleaseMutex(g_hLogFileMutex);
 
-                ConPrint(Format(pParameters->bufFormat, _T("Error seeking to end of log file:\n%s\n"),
+                ConPrint(Format(pParameters->bufFormat, "Error seeking to end of log file:\n%s\n",
                     GetLastErrorMessage(pParameters->bufLastError)));
                 dwRetCode = GetLastError();
             }
 
             if( !WriteFile(g_hLogFile, pParameters->pBuffer, dwBytesRead, &dwBytesWritten, NULL) )
             {
-                ConPrint(Format(pParameters->bufFormat, _T("Error writing to log file:\n%s\n"),
+                ConPrint(Format(pParameters->bufFormat, "Error writing to log file:\n%s\n",
                     GetLastErrorMessage(pParameters->bufLastError)));
                 dwRetCode = GetLastError();
             }
@@ -173,21 +184,22 @@ DWORD WINAPI ListenerThread(LPVOID lpParameter)
     return dwRetCode;
 }
 
-extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
+extern "C" void mainCRTStartup()
 {
+    static const WCHAR szCmdPrefix[] = L"cmd.exe /x/c ";
+
+    LPWSTR pszArgs = PathGetArgsW(GetCommandLineW());
+
     DWORD   dwRetCode = ERROR_INVALID_FUNCTION;
-    LPTSTR  pszChildCmdLine = NULL;
-    LPTSTR  pszArgs = NULL;
-    LPCTSTR pszCmdPrefix = _T("cmd.exe /x/c ");
+    LPWSTR  pszChildCmdLine = NULL;
     DWORD   cchChildCmdLine = 0;
-    DWORD   dwChildCmdLineStartOffset = 0;
 
-    STARTUPINFO ChildStartupInfo;
+    STARTUPINFOW ChildStartupInfo;
 
-    TCHAR szMaxPathBuffer[MAX_PATH];
+    WCHAR szMaxPathBuffer[MAX_PATH];
     DWORD cchReqBufSize;
 
-    SECURITY_ATTRIBUTES saAttr; 
+    SECURITY_ATTRIBUTES saAttr;
 
     HANDLE hStdOutReadPipe = INVALID_HANDLE_VALUE;
     HANDLE hStdOutReadPipeDup = INVALID_HANDLE_VALUE;
@@ -213,12 +225,12 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     bool  fConsoleErrorOn = true;
     bool  fLogFileErrorOn = true;
     bool  fLogFileAppend = false;
-    bool  bLogFileQuiet = false;
+    bool  fLogFileQuiet = false;
+    bool  fStopWatch = false;
 
-    TCHAR *szLogFile = 0;
-
-    TCHAR   szPidFile[MAX_PATH] = {0};
-    HANDLE  hPidFile = INVALID_HANDLE_VALUE;
+    WCHAR *szLogFile = 0;
+    WCHAR *szPidFile = 0;
+    WCHAR *szScriptName = 0;
 
     //
     // Save off our inherited std handles
@@ -239,95 +251,112 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     // Look for switches directed at us
     //
-    dwChildCmdLineStartOffset = argc;
-    for(int i = 1; i < argc; i++ )
+    while (*pszArgs == '-')
     {
-        LPCTSTR pszSwitch = argv[i];
+        LPWSTR pszSwitch = pszArgs;
+        pszArgs = PathGetArgsW(pszArgs);
+        PathRemoveArgsW(pszSwitch);
 
-        if( 0 == _tcsicmp(pszSwitch, _T("-nc")) )
+        if( 0 == StrCmpIW(pszSwitch, L"-nc") )
         {
             fConsoleOutputOn = false;
             fConsoleErrorOn = false;
         }
-        else if( 0 == _tcsicmp(pszSwitch, _T("-nl")) )
+        else if( 0 == StrCmpIW(pszSwitch, L"-nl") )
         {
             fLogFileOutputOn = false;
             fLogFileErrorOn = false;
         }
-        else if( 0 == _tcsicmp(pszSwitch, _T("-nco")) )
+        else if( 0 == StrCmpIW(pszSwitch, L"-nco") )
             fConsoleOutputOn = false;
-        else if( 0 == _tcsicmp(pszSwitch, _T("-nlo")) )
-            fLogFileOutputOn = false;                  
-        else if( 0 == _tcsicmp(pszSwitch, _T("-nce")) )
+        else if( 0 == StrCmpIW(pszSwitch, L"-nlo") )
+            fLogFileOutputOn = false;
+        else if( 0 == StrCmpIW(pszSwitch, L"-nce") )
             fConsoleErrorOn = false;
-        else if( 0 == _tcsicmp(pszSwitch, _T("-nle")) )
+        else if( 0 == StrCmpIW(pszSwitch, L"-nle") )
             fLogFileErrorOn = false;
-        else if( 0 == _tcsicmp(pszSwitch, _T("-pid")) )
+        else if( 0 == StrCmpIW(pszSwitch, L"-pid") )
         {
-            if (i + 1 == argc)
+            if (*pszArgs == L'\0')
             {
-                ConPrint(_T("Error: -pid switch specified without associated file name\n"));
+                ConPrint("Error: -pid switch specified without associated file name\n");
                 dwRetCode = GetLastError();
                 goto Error;
             }
-
-            _tcscpy_s(szPidFile, _countof(szPidFile), argv[++i]);
+            szPidFile = pszArgs;
+            pszArgs = PathGetArgsW(pszArgs);
+            PathRemoveArgsW(szPidFile);
+            PathUnquoteSpacesW(szPidFile);
         }
-        else if(0 == _tcsicmp(pszSwitch, _T("-file")))
+        else if(0 == StrCmpIW(pszSwitch, L"-file"))
         {
-            if(i + 1 == argc)
+            if (*pszArgs == L'\0')
             {
-                ConPrint(_T("Error: -file switch specified without associated file name\n"));
+                ConPrint("Error: -file switch specified without associated file name\n");
                 dwRetCode = GetLastError();
                 goto Error;
             }
-
-            szLogFile = argv[++i];
+            szLogFile = pszArgs;
+            pszArgs = PathGetArgsW(pszArgs);
+            PathRemoveArgsW(szLogFile);
+            PathUnquoteSpacesW(szLogFile);
         }
-        else if(0 == _tcsicmp(pszSwitch, _T("-quiet")))
-            bLogFileQuiet = true;
-        else if(0 == _tcsicmp(pszSwitch, _T("-append")))
+        else if(0 == StrCmpIW(pszSwitch, L"-name"))
+        {
+            if (*pszArgs == L'\0')
+            {
+                ConPrint("Error: -file switch specified without associated file name\n");
+                dwRetCode = GetLastError();
+                goto Error;
+            }
+            szScriptName = pszArgs;
+            pszArgs = PathGetArgsW(pszArgs);
+            PathRemoveArgsW(szScriptName);
+            PathUnquoteSpacesW(szScriptName);
+        }
+        else if(0 == StrCmpIW(pszSwitch, L"-quiet"))
+            fLogFileQuiet = true;
+        else if(0 == StrCmpIW(pszSwitch, L"-append"))
             fLogFileAppend = true;
+        else if (0 == StrCmpIW(pszSwitch, L"-stopwatch"))
+            fStopWatch = true;
         else
         {
-            dwChildCmdLineStartOffset = i;
-            break;
+            ConPrint("Error: unknown switch specified\n");
+            dwRetCode = GetLastError();
+            goto Error;
         }
     }
 
     //
     // Output the current process' PID to the specified file
     //
-    if (_tcslen(szPidFile) > 0)
+    if(szPidFile != 0)
     {
-        DWORD dwPid = GetCurrentProcessId();
-        if( (hPidFile = CreateFile(szPidFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL, NULL ) ) == INVALID_HANDLE_VALUE )
+        HANDLE const hPidFile = CreateFileW(szPidFile,
+            GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hPidFile == INVALID_HANDLE_VALUE)
         {
-            ConPrint(Format(bufFormatMain, _T("Error creating PID file '%s':\n%s\n"),
-                szMaxPathBuffer, GetLastErrorMessage(bufLastErrorMain)));
+            ConPrint(Format(bufFormatMain, "Error creating PID file '%ls':\n%s\n",
+                szPidFile, GetLastErrorMessage(bufLastErrorMain)));
             dwRetCode = GetLastError();
             goto Error;
         }
 
         DWORD dwBytesWritten;
-        TCHAR szPidString[64] = {0};
-        if (-1 == _stprintf_s(szPidString, _countof(szPidString), _T("%d"), dwPid))
-        {
-            ConPrint(Format(bufFormatMain, _T("Error formatting PID string:\n%d\n"), dwPid));
-            goto Error;
-        }
+        CHAR szPidString[64];
+        int len = wnsprintfA(szPidString, _countof(szPidString), "%u", GetCurrentProcessId());
+        BOOL ok = WriteFile(hPidFile, szPidString, len, &dwBytesWritten, NULL);
+        CloseHandle(hPidFile);
 
-        if( !WriteFile(hPidFile, szPidString, _tcslen(szPidString) * sizeof(TCHAR), &dwBytesWritten, NULL) )
+        if (!ok)
         {
-            ConPrint(Format(bufFormatMain, _T("Error writing to PID file:\n%s\n"),
+            ConPrint(Format(bufFormatMain, "Error writing to PID file:\n%s\n",
                 GetLastErrorMessage(bufLastErrorMain)));
             dwRetCode = GetLastError();
             goto Error;
         }
-
-        CloseHandle(hPidFile);
-        hPidFile = INVALID_HANDLE_VALUE;
     }
 
     //
@@ -335,17 +364,17 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     if(szLogFile == 0)
     {
-        cchReqBufSize = GetEnvironmentVariable(_T("LOGFILE"), szMaxPathBuffer, MAX_PATH);
-        if(cchReqBufSize > 0 && cchReqBufSize <= MAX_PATH)
+        cchReqBufSize = GetEnvironmentVariableW(L"LOGFILE", szMaxPathBuffer, MAX_PATH);
+        if(cchReqBufSize > 0 && cchReqBufSize < MAX_PATH)
             szLogFile = szMaxPathBuffer;
     }
     if(szLogFile != 0)
     {
         DWORD dwCreationDisposition = (fLogFileAppend ? OPEN_ALWAYS : CREATE_ALWAYS);
-        if( (g_hLogFile = CreateFile(szLogFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, dwCreationDisposition,
+        if( (g_hLogFile = CreateFileW(szLogFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, dwCreationDisposition,
             FILE_ATTRIBUTE_NORMAL, NULL ) ) == INVALID_HANDLE_VALUE )
         {
-            ConPrint(Format(bufFormatMain, _T("Error opening log file '%s':\n%s\n"),
+            ConPrint(Format(bufFormatMain, "Error opening log file '%ls':\n%s\n",
                 szLogFile, GetLastErrorMessage(bufLastErrorMain)));
             dwRetCode = GetLastError();
             goto Error;
@@ -353,18 +382,18 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     }
 
     //
-    // Set the bInheritHandle flag so pipe handles are inherited. 
+    // Set the bInheritHandle flag so pipe handles are inherited.
     //
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES); 
-    saAttr.bInheritHandle = TRUE; 
-    saAttr.lpSecurityDescriptor = NULL; 
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
 
     //
     // Create the output pipe for the child process
     //
     if( !CreatePipe(&hStdOutReadPipe, &hStdOutWritePipe, &saAttr, 0) )
     {
-        ConPrint(Format(bufFormatMain, _T("Error creating output pipe for child process:\n%s\n"),
+        ConPrint(Format(bufFormatMain, "Error creating output pipe for child process:\n%s\n",
             GetLastErrorMessage(bufLastErrorMain)));
         dwRetCode = GetLastError();
         goto Error;
@@ -375,7 +404,7 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
         FALSE,
         DUPLICATE_SAME_ACCESS) )
     {
-        ConPrint(Format(bufFormatMain, _T("Error creating output pipe for child process:\n%s\n"),
+        ConPrint(Format(bufFormatMain, "Error creating output pipe for child process:\n%s\n",
             GetLastErrorMessage(bufLastErrorMain)));
         dwRetCode = GetLastError();
         goto Error;
@@ -389,7 +418,7 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     if( !CreatePipe(&hStdErrReadPipe, &hStdErrWritePipe, &saAttr, 0) )
     {
-        ConPrint(Format(bufFormatMain, _T("Error creating output pipe for child process:\n%s\n"),
+        ConPrint(Format(bufFormatMain, "Error creating output pipe for child process:\n%s\n",
             GetLastErrorMessage(bufLastErrorMain)));
         dwRetCode = GetLastError();
         goto Error;
@@ -400,7 +429,7 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
         FALSE,
         DUPLICATE_SAME_ACCESS) )
     {
-        ConPrint(Format(bufFormatMain, _T("Error creating output pipe for child process:\n%s\n"),
+        ConPrint(Format(bufFormatMain, "Error creating output pipe for child process:\n%s\n",
             GetLastErrorMessage(bufLastErrorMain)));
         dwRetCode = GetLastError();
         goto Error;
@@ -424,72 +453,47 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     // Allocate space for the non-constant command line
     //
-    cchChildCmdLine = _tcslen(pszCmdPrefix) + 1;
-    for( int i = dwChildCmdLineStartOffset; i < argc; i++ )
-    {
-        // Allocate enough for the argument, two quotes and a space
-        cchChildCmdLine += _tcslen(argv[i]) + 3;
-    }
-
-    pszChildCmdLine = (LPTSTR) HeapAlloc(GetProcessHeap(), NULL, cchChildCmdLine * sizeof(TCHAR));
+    cchChildCmdLine = wcslen(szCmdPrefix) + 1 + wcslen(pszArgs);
+    pszChildCmdLine = (LPWSTR)LocalAlloc(LPTR, cchChildCmdLine * sizeof(WCHAR));
     if( pszChildCmdLine == NULL )
     {
-        ConPrint(_T("Memory allocation error.\n"));
+        ConPrint("Memory allocation error.\n");
         dwRetCode = GetLastError();
         goto Error;
-    }
-
-    pszArgs = (LPTSTR) HeapAlloc(GetProcessHeap(), NULL, cchChildCmdLine * sizeof(TCHAR));
-    pszArgs[0] = _T('\0');
-    if( pszArgs == NULL )
-    {
-        ConPrint(_T("Memory allocation error.\n"));
-        dwRetCode = GetLastError();
-        goto Error;
-    }
-
-    // Copy arguments into a single string
-    for( int i = dwChildCmdLineStartOffset; i < argc; i++ )
-    {
-        if (_tcsstr(argv[i], _T(" ")) != NULL)
-            _tcscat_s(pszArgs, cchChildCmdLine, _T("\""));
-
-        _tcscat_s(pszArgs, cchChildCmdLine, argv[i]);
-
-        if (_tcsstr(argv[i], _T(" ")) != NULL)
-            _tcscat_s(pszArgs, cchChildCmdLine, _T("\""));
-
-        _tcscat_s(pszArgs, cchChildCmdLine, _T(" "));
     }
 
     //
     // Output the script name & command to the log file
     //
-    cchReqBufSize = GetEnvironmentVariable(_T("SCRIPT_NAME"), szMaxPathBuffer, MAX_PATH);
-    if( cchReqBufSize == 0 || cchReqBufSize >= MAX_PATH )
-        _tcscpy_s( szMaxPathBuffer, _countof(szMaxPathBuffer), _T("SCRIPT_NAME not set") );
-
-    if(!bLogFileQuiet)
-        LogPrint(Format(bufFormatMain, _T("[%s] %s\r\n"), szMaxPathBuffer, pszArgs ) );
+    if( szScriptName == 0 )
+    {
+        cchReqBufSize = GetEnvironmentVariableW(L"SCRIPT_NAME", szMaxPathBuffer, MAX_PATH);
+        if(cchReqBufSize > 0 && cchReqBufSize < MAX_PATH)
+            szScriptName = szMaxPathBuffer;
+        else
+            szScriptName = L"SCRIPT_NAME not set";
+    }
+    if(!fLogFileQuiet)
+        LogPrint(Format(bufFormatMain, "[%ls] %ls\r\n", szScriptName, pszArgs));
 
     //
     // Try to create the process plainly (without using CMD.EXE)
     //
-    _tcscpy_s(pszChildCmdLine, cchChildCmdLine, pszArgs);
-    if( !CreateProcess( NULL, pszChildCmdLine,
+    StringCchCopyW(pszChildCmdLine, cchChildCmdLine, pszArgs);
+    if( !CreateProcessW( NULL, pszChildCmdLine,
         NULL, NULL, TRUE, 0, NULL, NULL,
         &ChildStartupInfo, &ChildProcessInfo ) )
     {
         //
         // Didn't work. Could be a cmd.exe command... Try that.
         //
-        _tcscpy_s(pszChildCmdLine, cchChildCmdLine, pszCmdPrefix);
-        _tcscat_s(pszChildCmdLine, cchChildCmdLine, pszArgs);
-        if( !CreateProcess( NULL, pszChildCmdLine,
+        StringCchCopyW(pszChildCmdLine, cchChildCmdLine, szCmdPrefix);
+        StringCchCatW(pszChildCmdLine, cchChildCmdLine, pszArgs);
+        if( !CreateProcessW( NULL, pszChildCmdLine,
             NULL, NULL, TRUE, 0, NULL, NULL,
             &ChildStartupInfo, &ChildProcessInfo ) )
         {
-            ConPrint(Format(bufFormatMain, _T("Error executing command line '%s':\n%s\n"),
+            ConPrint(Format(bufFormatMain, "Error executing command line '%ls':\n%s\n",
                 pszArgs, GetLastErrorMessage(bufLastErrorMain)));
             dwRetCode = GetLastError();
             goto Error;
@@ -539,28 +543,14 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     {
         if( !GetExitCodeThread( rgThreadHandles[i], &dwRetCode ) )
         {
-            ConPrint(Format(bufFormatMain, _T("Error retrieving listener thread exit code.\n")));
+            ConPrint(Format(bufFormatMain, "Error retrieving listener thread exit code.\n"));
             goto Error;
         }
 
         if( dwRetCode != ERROR_SUCCESS )
         {
-            LPVOID pvMsgBuf = NULL;
-            FormatMessage( 
-                FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-                FORMAT_MESSAGE_FROM_SYSTEM | 
-                FORMAT_MESSAGE_IGNORE_INSERTS,
-                NULL,
-                GetLastError(),
-                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
-                (LPTSTR) &pvMsgBuf,
-                0,
-                NULL 
-            );
-
-            ConPrint(Format(bufFormatMain, _T("Listener thread returned an error:\n%s\n"), pvMsgBuf));
-            LocalFree( pvMsgBuf );
-
+            ConPrint(Format(bufFormatMain, "Listener thread returned an error:\n%s\n",
+                GetLastErrorMessage(bufLastErrorMain, dwRetCode)));
             goto Error;
         }
     }
@@ -576,10 +566,38 @@ extern "C" int __cdecl _tmain(int argc, _TCHAR* argv[])
     //
     if( !GetExitCodeProcess(ChildProcessInfo.hProcess, &dwRetCode) )
     {
-        ConPrint(Format(bufFormatMain, _T("Error retrieving child process' exit code:\n%s\n"),
+        ConPrint(Format(bufFormatMain, "Error retrieving child process' exit code:\n%s\n",
             GetLastErrorMessage(bufLastErrorMain)));
         dwRetCode = GetLastError();
         goto Error;
+    }
+
+    if (fStopWatch)
+    {
+        FILETIME ftc, fte, ftk, ftu;
+        if (GetThreadTimes(ChildProcessInfo.hThread, &ftc, &fte, &ftk, &ftu))
+        {
+            SYSTEMTIME st;
+            WCHAR date[80], time[80];
+            ConPrint(!FileTimeToSystemTime(&ftc, &st) ?
+                "Started:  ?\r\n" : Format(bufFormatMain, "Started:  %ls %ls\r\n",
+                GetDateFormatW(LOCALE_INVARIANT, 0, &st, NULL, date, _countof(date)) ? date : L"?",
+                GetTimeFormatW(LOCALE_INVARIANT, 0, &st, NULL, time, _countof(time)) ? time : L"?"),
+                fLogFileQuiet);
+            ConPrint(!FileTimeToSystemTime(&fte, &st) ?
+                "Finished: ?\r\n" : Format(bufFormatMain, "Finished: %ls %ls\r\n",
+                GetDateFormatW(LOCALE_INVARIANT, 0, &st, NULL, date, _countof(date)) ? date : L"?",
+                GetTimeFormatW(LOCALE_INVARIANT, 0, &st, NULL, time, _countof(time)) ? time : L"?"),
+                fLogFileQuiet);
+            // Approximate elapsed time in milliseconds - 2.4% off, and will overflow by end of day 5, but hey
+            UINT64 elapsed = __ull_rshift(reinterpret_cast<UINT64 &>(fte) - reinterpret_cast<UINT64 &>(ftc), 10);
+            ConPrint(static_cast<ULONG>(elapsed) != elapsed ?
+                "Elapsed:  ?\r\n" : Format(bufFormatMain, "Elapsed:  %03u,%03u,%03u ms\r\n",
+                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E7) % 1000,
+                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E4) % 1000,
+                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E1) % 1000),
+                fLogFileQuiet);
+        }
     }
 
 Error:
@@ -589,21 +607,16 @@ Error:
         //
         // Print a nice, ugly, grepable error signature
         //
-        if(!bLogFileQuiet)
-            LogPrint(Format(bufFormatMain, _T("******ERROR executing %s\r\n"), pszArgs));
+        if(!fLogFileQuiet)
+            LogPrint(Format(bufFormatMain, "******ERROR executing %ls\r\n", pszArgs));
     }
 
     for( int i = 0; i < bufCount; i++ )
     {
-        if( g_pszBuffer[i] != NULL )
-            HeapFree( GetProcessHeap(), NULL, g_pszBuffer[i] );
+        LocalFree(g_pszBuffer[i]);
     }
 
-    if( pszChildCmdLine != NULL )
-        HeapFree( GetProcessHeap(), NULL, pszChildCmdLine );
-
-    if( pszArgs != NULL )
-        HeapFree( GetProcessHeap(), NULL, pszArgs );
+    LocalFree(pszChildCmdLine);
 
     if( hStdOutReadPipe != INVALID_HANDLE_VALUE )
         CloseHandle( hStdOutReadPipe );
@@ -641,8 +654,5 @@ Error:
     if( ChildProcessInfo.hProcess != INVALID_HANDLE_VALUE )
         CloseHandle(ChildProcessInfo.hProcess);
 
-    if( hPidFile != INVALID_HANDLE_VALUE )
-        CloseHandle(hPidFile);
-
-    return dwRetCode;
+    ExitProcess(dwRetCode);
 }
