@@ -592,14 +592,29 @@ extern "C" void mainCRTStartup()
                 GetDateFormatW(LOCALE_INVARIANT, 0, &st, NULL, date, _countof(date)) ? date : L"?",
                 GetTimeFormatW(LOCALE_INVARIANT, 0, &st, NULL, time, _countof(time)) ? time : L"?"),
                 fLogFileQuiet);
-            // Approximate elapsed time in milliseconds - 2.4% off, and will overflow by end of day 5, but hey
-            UINT64 elapsed = __ull_rshift(reinterpret_cast<UINT64 &>(fte) - reinterpret_cast<UINT64 &>(ftc), 10);
-            ConPrint(static_cast<ULONG>(elapsed) != elapsed ?
-                "Elapsed:  ?\r\n" : Format(bufFormatMain, "Elapsed:  %03u,%03u,%03u ms\r\n",
-                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E7) % 1000,
-                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E4) % 1000,
-                static_cast<ULONG>(elapsed) / static_cast<ULONG>(1E1) % 1000),
-                fLogFileQuiet);
+            // Format elapsed time using different leading units
+            LONGLONG elapsed = reinterpret_cast<LONGLONG &>(fte) - reinterpret_cast<LONGLONG &>(ftc);
+            if (StrFormatKBSizeW(__ll_lshift(elapsed, 10), time, _countof(time))) // slightly abusive
+            {
+                WCHAR *p = time, *q = time;
+                while (WCHAR c = *q++) if (c >= L'0' && c <= L'9') *p++ = c;
+                if (p - time > 6)
+                {
+                    *(p - 6) = L'\0'; // Truncate to 10th of seconds
+                    LARGE_INTEGER ds;
+                    ConPrint(!StrToInt64ExW(time, STIF_DEFAULT, &ds.QuadPart) || ds.HighPart != 0 ?
+                        "Elapsed:  ?\r\n" : Format(bufFormatMain,
+                        "Elapsed:  %8u %02u:%02u:%02u.%u\r\n"   // DDD HH:MM:SS.F
+                                      "%21u:%02u:%02u.%u\r\n"   //    HHH:MM:SS.F
+                                           "%24u:%02u.%u\r\n"   //       MMM:SS.F
+                                                "%27u.%u\r\n",  //          SSS.F
+                        ds.LowPart / 864000U,   ds.LowPart / 36000U % 24U,  ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                                ds.LowPart / 36000U,        ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                                                            ds.LowPart / 600U,          ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                                                                                        ds.LowPart / 10U,       ds.LowPart % 10U),
+                        fLogFileQuiet);
+                }
+            }
         }
     }
 
