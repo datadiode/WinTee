@@ -3,6 +3,8 @@
 #include <strsafe.h>
 #include <intrin.h>
 
+#include "git-describe.h"
+
 // lstrlenA(), lstrlenW() are evil in that they silently catch access violations
 #pragma intrinsic(strlen, wcslen)
 
@@ -263,16 +265,8 @@ extern "C" void mainCRTStartup()
         LPWSTR pszSwitch = pszArgs;
         pszArgs = PathGetAndRemoveArgsW(pszArgs);
 
-        if( 0 == StrCmpIW(pszSwitch, L"-nc") )
-        {
-            fConsoleOutputOn = false;
-            fConsoleErrorOn = false;
-        }
-        else if( 0 == StrCmpIW(pszSwitch, L"-nl") )
-        {
-            fLogFileOutputOn = false;
-            fLogFileErrorOn = false;
-        }
+        if( 0 == StrCmpIW(pszSwitch, L"-version") )
+            ConPrint("WinTee " GIT_DESCRIBE "\n");
         else if( 0 == StrCmpIW(pszSwitch, L"-nco") )
             fConsoleOutputOn = false;
         else if( 0 == StrCmpIW(pszSwitch, L"-nlo") )
@@ -281,6 +275,10 @@ extern "C" void mainCRTStartup()
             fConsoleErrorOn = false;
         else if( 0 == StrCmpIW(pszSwitch, L"-nle") )
             fLogFileErrorOn = false;
+        else if( 0 == StrCmpIW(pszSwitch, L"-nc") ) // shortcut for -nco -nce
+            fConsoleOutputOn = fConsoleErrorOn = false;
+        else if( 0 == StrCmpIW(pszSwitch, L"-nl") ) // shortcut for -nlo -nle
+            fLogFileOutputOn = fLogFileErrorOn = false;
         else if( 0 == StrCmpIW(pszSwitch, L"-pid") )
         {
             if (*pszArgs == L'\0')
@@ -367,7 +365,7 @@ extern "C" void mainCRTStartup()
     //
     if(szLogFile == 0)
     {
-        cchReqBufSize = GetEnvironmentVariableW(L"LOGFILE", szMaxPathBuffer, MAX_PATH);
+        cchReqBufSize = GetEnvironmentVariableW(L"WINTEE_FILE", szMaxPathBuffer, MAX_PATH);
         if(cchReqBufSize > 0 && cchReqBufSize < MAX_PATH)
             szLogFile = szMaxPathBuffer;
     }
@@ -470,11 +468,11 @@ extern "C" void mainCRTStartup()
     //
     if( szScriptName == 0 )
     {
-        cchReqBufSize = GetEnvironmentVariableW(L"SCRIPT_NAME", szMaxPathBuffer, MAX_PATH);
+        cchReqBufSize = GetEnvironmentVariableW(L"WINTEE_NAME", szMaxPathBuffer, MAX_PATH);
         if(cchReqBufSize > 0 && cchReqBufSize < MAX_PATH)
             szScriptName = szMaxPathBuffer;
         else
-            szScriptName = L"SCRIPT_NAME not set";
+            szScriptName = L"WINTEE_NAME not set";
     }
     if(!fLogFileQuiet)
         LogPrint(Format(bufFormatMain, "[%ls] %ls\r\n", szScriptName, pszArgs));
@@ -594,27 +592,28 @@ extern "C" void mainCRTStartup()
                 fLogFileQuiet);
             // Format elapsed time using different leading units
             LONGLONG elapsed = reinterpret_cast<LONGLONG &>(fte) - reinterpret_cast<LONGLONG &>(ftc);
-            if (StrFormatKBSizeW(__ll_lshift(elapsed, 10), time, _countof(time))) // slightly abusive
+            size_t const leading_zeros = 6;
+            __stosw(reinterpret_cast<unsigned short *>(time), L'0', leading_zeros);
+            if (elapsed & 0xFFE0000000000000LL || // Will shifting left by 10 bits induce loss?
+                !StrFormatKBSizeW(__ll_lshift(elapsed, 10), time + leading_zeros, _countof(time) - leading_zeros)) // slightly abusive
             {
-                WCHAR *p = time, *q = time;
-                while (WCHAR c = *q++) if (c >= L'0' && c <= L'9') *p++ = c;
-                if (p - time > 6)
-                {
-                    *(p - 6) = L'\0'; // Truncate to 10th of seconds
-                    LARGE_INTEGER ds;
-                    ConPrint(!StrToInt64ExW(time, STIF_DEFAULT, &ds.QuadPart) || ds.HighPart != 0 ?
-                        "Elapsed:  ?\r\n" : Format(bufFormatMain,
-                        "Elapsed:  %8u %02u:%02u:%02u.%u\r\n"   // DDD HH:MM:SS.F
-                                      "%21u:%02u:%02u.%u\r\n"   //    HHH:MM:SS.F
-                                           "%24u:%02u.%u\r\n"   //       MMM:SS.F
-                                                "%27u.%u\r\n",  //          SSS.F
-                        ds.LowPart / 864000U,   ds.LowPart / 36000U % 24U,  ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
-                                                ds.LowPart / 36000U,        ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
-                                                                            ds.LowPart / 600U,          ds.LowPart / 10U % 60U, ds.LowPart % 10U,
-                                                                                                        ds.LowPart / 10U,       ds.LowPart % 10U),
-                        fLogFileQuiet);
-                }
+                time[leading_zeros] = '\0'; // Have StrToInt64ExW() fail
             }
+            WCHAR *p = time + leading_zeros, *q = time + leading_zeros;
+            while (WCHAR c = *q++) if (c >= L'0' && c <= L'9') *p++ = c;
+            *(p - leading_zeros) = L'\0'; // Truncate to 10th of seconds
+            LARGE_INTEGER ds;
+            ConPrint(!StrToInt64ExW(time, STIF_DEFAULT, &ds.QuadPart) || ds.HighPart != 0 ?
+                "Elapsed:  ?\r\n" : Format(bufFormatMain,
+                "Elapsed:  %8u %02u:%02u:%02u.%u\r\n"   // DDD HH:MM:SS.F
+                                "%21u:%02u:%02u.%u\r\n"   //    HHH:MM:SS.F
+                                    "%24u:%02u.%u\r\n"   //       MMM:SS.F
+                                        "%27u.%u\r\n",  //          SSS.F
+                ds.LowPart / 864000U,   ds.LowPart / 36000U % 24U,  ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                        ds.LowPart / 36000U,        ds.LowPart / 600U % 60U,    ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                                                    ds.LowPart / 600U,          ds.LowPart / 10U % 60U, ds.LowPart % 10U,
+                                                                                                ds.LowPart / 10U,       ds.LowPart % 10U),
+                fLogFileQuiet);
         }
     }
 
